@@ -1,41 +1,24 @@
-import os
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import plotly.io as pio
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-CACHE_FILE = "/tmp/stock_data.csv"
-CACHE_EXPIRY_HOURS = 1
-
-def get_data(ticker):
-    # 快取機制
-    if os.path.exists(CACHE_FILE):
-        file_time = os.path.getmtime(CACHE_FILE)
-        if datetime.now() - datetime.fromtimestamp(file_time) < timedelta(hours=CACHE_EXPIRY_HOURS):
-            return pd.read_csv(CACHE_FILE, index_col=0, parse_dates=True)
-
-    # 抓取資料，增加 auto_adjust 以符合標準格式
-    df = yf.download(ticker, period="1mo", interval="1d", progress=False, auto_adjust=True)
-    
-    # 【關鍵修正】：如果抓到的是 MultiIndex (常見於大盤代號)，將其扁平化
+def get_data(ticker, start_date, end_date):
+    # 直接抓取指定區間，不依賴本機快取 (避免日期範圍衝突)
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    
-    if not df.empty:
-        df.to_csv(CACHE_FILE)
     return df
 
-def get_kline_chart(ticker, title):
-    df = get_data(ticker)
+def get_kline_chart(ticker, title, start_date, end_date):
+    df = get_data(ticker, start_date, end_date)
     
-    # 檢查必要的欄位是否存在
-    required_cols = ['Open', 'High', 'Low', 'Close']
-    if df.empty or not all(col in df.columns for col in required_cols):
-        return f"<p style='color:red;'>無法顯示 {title}，數據異常。</p>"
+    if df.empty:
+        return f"<p>無 {title} 在 {start_date} 至 {end_date} 之間的資料。</p>"
     
     fig = go.Figure(data=[go.Candlestick(
         x=df.index,
@@ -53,16 +36,24 @@ HTML_TEMPLATE = """
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>台股分析儀表板</title>
+    <title>台股日期篩選分析</title>
     <style>
         body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
         .container { max-width: 900px; margin: auto; }
-        .chart-box { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .controls { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .chart-box { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>台股即時走勢</h1>
+        <h1>台股自訂區間分析</h1>
+        <div class="controls">
+            <form action="/" method="GET">
+                開始日期: <input type="date" name="start" value="{{ start }}">
+                結束日期: <input type="date" name="end" value="{{ end }}">
+                <button type="submit">查詢</button>
+            </form>
+        </div>
         <div class="chart-box">{{ index_chart | safe }}</div>
         <div class="chart-box">{{ tsmc_chart | safe }}</div>
     </div>
@@ -72,10 +63,14 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    # 這裡依序抓取，你可以根據需要修改代碼
-    index_chart = get_kline_chart("^TWII", "台股大盤走勢")
-    tsmc_chart = get_kline_chart("2330.TW", "台積電走勢")
-    return render_template_string(HTML_TEMPLATE, index_chart=index_chart, tsmc_chart=tsmc_chart)
+    # 獲取 GET 參數，預設為過去 30 天
+    end_date = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
+    start_date = request.args.get('start', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+    
+    index_chart = get_kline_chart("^TWII", "台股大盤走勢", start_date, end_date)
+    tsmc_chart = get_kline_chart("2330.TW", "台積電走勢", start_date, end_date)
+    
+    return render_template_string(HTML_TEMPLATE, index_chart=index_chart, tsmc_chart=tsmc_chart, start=start_date, end=end_date)
 
 if __name__ == '__main__':
     app.run(debug=True)
