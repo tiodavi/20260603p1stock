@@ -1,76 +1,66 @@
-import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import plotly.io as pio
 from flask import Flask, render_template_string, request
+from flask_caching import Cache
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
+# 設定快取：將資料快取 6 小時，減少 API 呼叫次數
+cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
-def get_data(ticker, start_date, end_date):
-    # 直接抓取指定區間，不依賴本機快取 (避免日期範圍衝突)
-    df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+def get_market_chart(ticker, title, start, end):
+    df = yf.download(ticker, start=start, end=end, progress=False)
+    if df.empty: return None
 
-def get_kline_chart(ticker, title, start_date, end_date):
-    df = get_data(ticker, start_date, end_date)
+    # 建立雙軸圖表 (上: K線, 下: 成交量)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.03, subplot_titles=(title, '成交量'),
+                        row_width=[0.2, 0.7])
+
+    # 繪製 K 線
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], 
+                                 low=df['Low'], close=df['Close'], name='Price'), row=1, col=1)
     
-    if df.empty:
-        return f"<p>無 {title} 在 {start_date} 至 {end_date} 之間的資料。</p>"
-    
-    fig = go.Figure(data=[go.Candlestick(
-        x=df.index,
-        open=df['Open'],
-        high=df['High'],
-        low=df['Low'],
-        close=df['Close']
-    )])
-    
-    fig.update_layout(title=title, xaxis_rangeslider_visible=False, height=400)
+    # 繪製成交量
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color='blue'), row=2, col=1)
+
+    fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=False)
     return pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">
-    <title>台股日期篩選分析</title>
-    <style>
-        body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
-        .container { max-width: 900px; margin: auto; }
-        .controls { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
-        .chart-box { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-    </style>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>專業股市分析平台</title>
 </head>
-<body>
-    <div class="container">
-        <h1>台股自訂區間分析</h1>
-        <div class="controls">
-            <form action="/" method="GET">
-                開始日期: <input type="date" name="start" value="{{ start }}">
-                結束日期: <input type="date" name="end" value="{{ end }}">
-                <button type="submit">查詢</button>
-            </form>
-        </div>
-        <div class="chart-box">{{ index_chart | safe }}</div>
-        <div class="chart-box">{{ tsmc_chart | safe }}</div>
+<body class="bg-light">
+    <div class="container py-4">
+        <h1 class="mb-4 text-center">📈 專業股市分析儀表板</h1>
+        <form method="GET" class="row g-3 mb-4 p-3 bg-white shadow-sm rounded">
+            <div class="col-md-5"><label>開始日期</label><input type="date" name="start" class="form-control" value="{{ start }}"></div>
+            <div class="col-md-5"><label>結束日期</label><input type="date" name="end" class="form-control" value="{{ end }}"></div>
+            <div class="col-md-2 d-flex align-items-end"><button class="btn btn-primary w-100">查詢</button></div>
+        </form>
+        <div class="card p-3 mb-4">{{ chart_idx | safe }}</div>
+        <div class="card p-3">{{ chart_tsmc | safe }}</div>
     </div>
 </body>
 </html>
 """
 
 @app.route('/')
+@cache.cached(timeout=21600, query_string=True) # 快取 6 小時
 def index():
-    # 獲取 GET 參數，預設為過去 30 天
-    end_date = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
-    start_date = request.args.get('start', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+    end = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
+    start = request.args.get('start', (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
     
-    index_chart = get_kline_chart("^TWII", "台股大盤走勢", start_date, end_date)
-    tsmc_chart = get_kline_chart("2330.TW", "台積電走勢", start_date, end_date)
+    chart_idx = get_market_chart("^TWII", "台股大盤", start, end)
+    chart_tsmc = get_market_chart("2330.TW", "台積電", start, end)
     
-    return render_template_string(HTML_TEMPLATE, index_chart=index_chart, tsmc_chart=tsmc_chart, start=start_date, end=end_date)
+    return render_template_string(HTML_TEMPLATE, chart_idx=chart_idx, chart_tsmc=chart_tsmc, start=start, end=end)
 
 if __name__ == '__main__':
     app.run(debug=True)
